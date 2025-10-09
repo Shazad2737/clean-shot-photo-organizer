@@ -1,0 +1,9 @@
+{
+    "blur_threshold": 100,
+    "similarity_threshold": 5,
+    "enable_face_detection": true,
+    "max_file_size_mb": 100,
+    "supported_formats": [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif", ".webp"],
+    "log_level": "INFO",
+    "auto_save_settings": true
+}

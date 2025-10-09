@@ -1,0 +1,6 @@
+2025-09-28 01:14:54,035 - main - INFO - Starting CLEAN SHOT application
+2025-09-28 01:14:54,129 - main - ERROR - Failed to start application: name 'QScrollArea' is not defined
+2025-09-28 01:16:07,036 - main - INFO - Starting CLEAN SHOT application
+2025-09-28 01:16:07,602 - main - INFO - Application started successfully
+2025-10-06 10:21:57,599 - __main__ - INFO - Starting CLEAN SHOT application
+2025-10-06 10:21:57,743 - __main__ - ERROR - Failed to start application: 'text_light'
