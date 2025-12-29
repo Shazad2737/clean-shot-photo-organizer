@@ -40,8 +40,9 @@ class TestBlurDetector(unittest.TestCase):
         cv2.imwrite(img_path, blurry_img)
         
         # Test detection
-        is_blurry = self.detector.is_blurry(img_path)
+        is_blurry, blur_score = self.detector.is_blurry(img_path)
         self.assertTrue(is_blurry, "Should detect blurry image")
+        self.assertIsNotNone(blur_score, "Should return blur score")
     
     def test_sharp_image_detection(self):
         """Test detection of sharp images."""
@@ -54,14 +55,16 @@ class TestBlurDetector(unittest.TestCase):
         cv2.imwrite(img_path, sharp_img)
         
         # Test detection
-        is_blurry = self.detector.is_blurry(img_path)
+        is_blurry, blur_score = self.detector.is_blurry(img_path)
         self.assertFalse(is_blurry, "Should not detect sharp image as blurry")
+        self.assertIsNotNone(blur_score, "Should return blur score")
     
     def test_invalid_image_path(self):
         """Test handling of invalid image paths."""
         invalid_path = os.path.join(self.temp_dir, "nonexistent.jpg")
-        is_blurry = self.detector.is_blurry(invalid_path)
+        is_blurry, blur_score = self.detector.is_blurry(invalid_path)
         self.assertFalse(is_blurry, "Should return False for invalid path")
+        self.assertIsNone(blur_score, "Should return None blur score for invalid path")
 
 
 class TestDuplicateDetector(unittest.TestCase):
@@ -90,28 +93,41 @@ class TestDuplicateDetector(unittest.TestCase):
         img2.save(img2_path)
         
         # Test first image (should not be duplicate)
-        is_dup1, _ = self.detector.is_duplicate(img1_path)
+        is_dup1, diff_score1, original1 = self.detector.is_duplicate(img1_path)
         self.assertFalse(is_dup1, "First image should not be duplicate")
         
         # Test second image (should be duplicate)
-        is_dup2, _ = self.detector.is_duplicate(img2_path)
+        is_dup2, diff_score2, original2 = self.detector.is_duplicate(img2_path)
         self.assertTrue(is_dup2, "Second identical image should be duplicate")
+        self.assertIsNotNone(diff_score2, "Should return diff score for duplicate")
+        self.assertIsNotNone(original2, "Should return original filename for duplicate")
     
     def test_different_images(self):
         """Test that different images are not detected as duplicates."""
-        # Create two different images
-        img1 = Image.new('RGB', (100, 100), color='red')
-        img2 = Image.new('RGB', (100, 100), color='blue')
+        # Create two different images with patterns (solid colors hash identically)
+        import numpy as np
+        # Image 1: Horizontal stripes
+        arr1 = np.zeros((100, 100, 3), dtype=np.uint8)
+        arr1[0:50, :] = [255, 0, 0]  # Red top half
+        arr1[50:100, :] = [0, 255, 0]  # Green bottom half
+        img1 = Image.fromarray(arr1)
+        
+        # Image 2: Vertical stripes  
+        arr2 = np.zeros((100, 100, 3), dtype=np.uint8)
+        arr2[:, 0:50] = [0, 0, 255]  # Blue left half
+        arr2[:, 50:100] = [255, 255, 0]  # Yellow right half
+        img2 = Image.fromarray(arr2)
         
         img1_path = os.path.join(self.temp_dir, "img1.jpg")
         img2_path = os.path.join(self.temp_dir, "img2.jpg")
         
         img1.save(img1_path)
         img2.save(img2_path)
+
         
         # Test both images
-        is_dup1, _ = self.detector.is_duplicate(img1_path)
-        is_dup2, _ = self.detector.is_duplicate(img2_path)
+        is_dup1, diff_score1, original1 = self.detector.is_duplicate(img1_path)
+        is_dup2, diff_score2, original2 = self.detector.is_duplicate(img2_path)
         
         self.assertFalse(is_dup1, "First image should not be duplicate")
         self.assertFalse(is_dup2, "Different image should not be duplicate")

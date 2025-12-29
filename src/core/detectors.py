@@ -1,5 +1,11 @@
 """
 Image detection algorithms for blur, duplicates, and faces.
+
+Enhanced with:
+- Multi-metric blur detection (Laplacian + Sobel)
+- Multi-hash duplicate detection (average + pHash + dHash)
+- Image normalization for consistent results
+- Reset functionality for session management
 """
 
 import cv2
@@ -7,82 +13,186 @@ import logging
 from PIL import Image
 import imagehash
 import numpy as np
-from typing import Tuple, Set, Optional
+from typing import Tuple, Dict, List, Optional
 
 
 class BlurDetector:
-    """Detects blurry images using Laplacian variance."""
+    """
+    Detects blurry images using multiple metrics:
+    1. Laplacian variance (edge detection)
+    2. Sobel gradient magnitude
     
-    def __init__(self, threshold: int = 100):
+    Images are normalized to a standard size for consistent comparison.
+    """
+    
+    def __init__(self, threshold: int = 100, max_dimension: int = 800):
         """
         Initialize blur detector.
         
         Args:
-            threshold: Laplacian variance threshold below which image is considered blurry
+            threshold: Combined blur score threshold below which image is considered blurry
+            max_dimension: Maximum dimension to resize images to for consistent comparison
         """
         self.threshold = threshold
+        self.max_dimension = max_dimension
     
-    def is_blurry(self, image_path: str) -> bool:
+    def get_blur_score(self, image_path: str) -> Optional[float]:
         """
-        Check if image is blurry using Laplacian variance.
+        Calculate blur score for an image.
+        
+        Higher scores indicate sharper images.
         
         Args:
             image_path: Path to the image file
             
         Returns:
-            True if image is blurry, False otherwise
+            Blur score (float) or None if image cannot be read
         """
         try:
-            image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-            if image is None:
+            img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
                 logging.warning(f"Could not read image: {image_path}")
-                return False
+                return None
             
-            laplacian_var = cv2.Laplacian(image, cv2.CV_64F).var()
-            return laplacian_var < self.threshold
+            # Normalize image size for consistent comparison
+            h, w = img.shape[:2]
+            if max(h, w) > self.max_dimension:
+                scale = self.max_dimension / max(h, w)
+                img = cv2.resize(img, None, fx=scale, fy=scale, 
+                               interpolation=cv2.INTER_AREA)
+            
+            # Method 1: Laplacian variance (primary metric)
+            laplacian = cv2.Laplacian(img, cv2.CV_64F)
+            laplacian_var = laplacian.var()
+            
+            # Method 2: Sobel gradient magnitude (secondary metric)
+            sobelx = cv2.Sobel(img, cv2.CV_64F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(img, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(sobelx**2 + sobely**2).mean()
+            
+            # Combined score: weighted average
+            blur_score = (laplacian_var * 0.7) + (gradient_magnitude * 0.3)
+            
+            return blur_score
+            
         except Exception as e:
             logging.error(f"Blur detection error for {image_path}: {e}")
-            return False
+            return None
+    
+    def is_blurry(self, image_path: str) -> Tuple[bool, Optional[float]]:
+        """
+        Check if image is blurry.
+        
+        Args:
+            image_path: Path to the image file
+            
+        Returns:
+            Tuple of (is_blurry: bool, blur_score: float or None)
+        """
+        blur_score = self.get_blur_score(image_path)
+        
+        if blur_score is None:
+            return False, None
+        
+        is_blur = blur_score < self.threshold
+        return is_blur, blur_score
 
 
 class DuplicateDetector:
-    """Detects duplicate images using perceptual hashing."""
+    """
+    Detects duplicate images using multiple perceptual hashing algorithms:
+    1. Average hash - good for overall similarity
+    2. Perceptual hash (pHash) - robust to scaling/compression
+    3. Difference hash (dHash) - captures gradients
+    
+    Uses weighted voting for more accurate detection.
+    """
     
     def __init__(self, similarity_threshold: int = 5, hash_size: int = 16):
         """
         Initialize duplicate detector.
         
         Args:
-            similarity_threshold: Maximum hash difference to consider images similar
-            hash_size: Size of the perceptual hash
+            similarity_threshold: Maximum weighted hash difference to consider images similar
+            hash_size: Size of the perceptual hash (larger = more precise)
         """
         self.similarity_threshold = similarity_threshold
         self.hash_size = hash_size
-        self.seen_hashes: Set[imagehash.ImageHash] = set()
+        self.seen_hashes: List[Dict] = []
     
-    def is_duplicate(self, image_path: str) -> Tuple[bool, Optional[imagehash.ImageHash]]:
+    def reset(self) -> None:
+        """Clear all seen hashes. Call this between processing sessions."""
+        self.seen_hashes.clear()
+        logging.info("DuplicateDetector: Hash cache cleared")
+    
+    def _compute_hashes(self, img: Image.Image) -> Dict:
+        """Compute all hash types for an image."""
+        return {
+            'avg': imagehash.average_hash(img, hash_size=self.hash_size),
+            'phash': imagehash.phash(img, hash_size=self.hash_size),
+            'dhash': imagehash.dhash(img, hash_size=self.hash_size),
+        }
+    
+    def _calculate_weighted_diff(self, hashes1: Dict, hashes2: Dict) -> float:
         """
-        Check if image is duplicate using perceptual hashing.
+        Calculate weighted difference between two hash sets.
+        
+        pHash gets highest weight as it's most robust.
+        """
+        avg_diff = hashes1['avg'] - hashes2['avg']
+        p_diff = hashes1['phash'] - hashes2['phash']
+        d_diff = hashes1['dhash'] - hashes2['dhash']
+        
+        # Weighted: pHash most important (50%), others 25% each
+        return (avg_diff * 0.25) + (p_diff * 0.5) + (d_diff * 0.25)
+    
+    def is_duplicate(self, image_path: str) -> Tuple[bool, Optional[float], Optional[str]]:
+        """
+        Check if image is a duplicate of any previously seen image.
         
         Args:
             image_path: Path to the image file
             
         Returns:
-            Tuple of (is_duplicate, hash_value)
+            Tuple of (is_duplicate: bool, diff_score: float or None, original_filename: str or None)
         """
         try:
             img = Image.open(image_path)
-            img_hash = imagehash.average_hash(img, self.hash_size)
             
-            for existing_hash in self.seen_hashes:
-                if img_hash - existing_hash <= self.similarity_threshold:
-                    return True, existing_hash
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             
-            self.seen_hashes.add(img_hash)
-            return False, img_hash
+            # Compute hashes
+            current_hashes = self._compute_hashes(img)
+            current_hashes['path'] = image_path
+            
+            # Compare against seen images
+            for seen in self.seen_hashes:
+                weighted_diff = self._calculate_weighted_diff(current_hashes, seen)
+                
+                if weighted_diff <= self.similarity_threshold:
+                    original_path = seen.get('path', 'unknown')
+                    original_name = original_path.split('\\')[-1].split('/')[-1]
+                    
+                    logging.debug(
+                        f"Duplicate found: {image_path} matches {original_name} "
+                        f"(diff: {weighted_diff:.1f})"
+                    )
+                    return True, weighted_diff, original_name
+            
+            # Not a duplicate, add to seen hashes
+            self.seen_hashes.append(current_hashes)
+            return False, None, None
+            
         except Exception as e:
             logging.error(f"Duplicate detection error for {image_path}: {e}")
-            return False, None
+            return False, None, None
+    
+    @property
+    def seen_count(self) -> int:
+        """Return the number of images seen so far."""
+        return len(self.seen_hashes)
 
 
 class FaceDetector:

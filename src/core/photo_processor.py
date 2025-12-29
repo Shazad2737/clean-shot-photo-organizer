@@ -3,6 +3,7 @@ Main photo processing logic with threading support.
 """
 
 import os
+import shutil
 import logging
 from typing import Dict, List
 from PySide6.QtCore import QThread, Signal
@@ -94,13 +95,14 @@ class PhotoProcessor(QThread):
         
         try:
             # Check for duplicates first
-            is_duplicate, _ = self.duplicate_detector.is_duplicate(file_path)
+            is_duplicate, _, _ = self.duplicate_detector.is_duplicate(file_path)
             if is_duplicate:
                 target_category = "Duplicate_Photos"
                 self.results['duplicate_photos'] += 1
             else:
                 # Check for blur
-                if self.blur_detector.is_blurry(file_path):
+                is_blurry, _ = self.blur_detector.is_blurry(file_path)
+                if is_blurry:
                     target_category = "Blurry_Photos"
                     self.results['blurry_photos'] += 1
                 else:

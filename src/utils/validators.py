@@ -10,7 +10,10 @@ from typing import List, Tuple
 class InputValidator:
     """Validates user inputs and file paths."""
     
-    SUPPORTED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.gif', '.webp')
+    SUPPORTED_IMAGE_EXTENSIONS = (
+        '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.gif', '.webp',
+        '.heic', '.heif', '.raw', '.cr2', '.nef', '.arw', '.orf', '.dng'
+    )
     
     @staticmethod
     def validate_folder_path(folder_path: str) -> Tuple[bool, str]:

@@ -36,3 +36,11 @@ Thumbs.db
 /test_photos/
 *.exe
 *.spec
+
+# External dependencies
+dlib/
+
+# Runtime files
+clean_shot_session.json
+operations.json
+src/operations.json

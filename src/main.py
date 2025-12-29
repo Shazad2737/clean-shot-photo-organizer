@@ -14,18 +14,6 @@ import json
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List, Set
 from pathlib import Path
-import io
-import tempfile
-
-# Pillow (single, clean import)
-from PIL import Image, ImageFile, UnidentifiedImageError
-ImageFile.LOAD_TRUNCATED_IMAGES = True
-
-# Numeric / image libs
-import numpy as np
-import cv2
-import imagehash
-import shutil
 
 # Qt
 from PySide6.QtWidgets import (
@@ -38,11 +26,12 @@ from PySide6.QtWidgets import (
     QStackedWidget, QGraphicsOpacityEffect, QSlider
 )
 from PySide6.QtCore import (
-    QThread, Signal, Qt, QTime, QSize, QTimer,
-    QMutex, QWaitCondition, QPropertyAnimation,
+    Signal, Qt, QSize, QTimer, QTime,
+    QPropertyAnimation,
     QEasingCurve, QParallelAnimationGroup, QSequentialAnimationGroup,
     Property
 )
+
 from PySide6.QtGui import (
     QFont, QColor, QPalette, QPixmap, QIcon,
     QPainter, QLinearGradient, QBrush, QPen
@@ -123,7 +112,7 @@ class ThemeManager:
         return f"""
             QWidget {{
                 background: transparent;
-                font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+                font-family: 'Poppins', 'Inter', 'Segoe UI', system-ui, sans-serif;
                 font-size: 13px;
                 color: {theme["TEXT_PRIMARY"]};
             }}
@@ -177,7 +166,6 @@ class ThemeManager:
                 color: white;
                 border: none;
                 font-weight: 600;
-                box-shadow: 0 4px 12px {theme["GLOW"]};
             }}
 
             QTabBar::tab:hover:!selected {{
@@ -332,7 +320,6 @@ class ThemeManager:
             QPushButton[variant="primary"]:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 {theme["PRIMARY_LIGHT"]}, stop:1 {theme["ACCENT_LIGHT"]});
-                box-shadow: 0 8px 20px {theme["GLOW"]};
             }}
 
             QPushButton[variant="primary"]:pressed {{
@@ -358,7 +345,6 @@ class ThemeManager:
                 background: {theme["PRIMARY"]};
                 color: white;
                 border-color: {theme["PRIMARY"]};
-                box-shadow: 0 4px 12px {theme["GLOW"]};
             }}
 
             QPushButton[variant="ghost"] {{
@@ -387,7 +373,8 @@ class ThemeManager:
             }}
 
             QPushButton[variant="success"]:hover {{
-                box-shadow: 0 8px 20px rgba(16, 185, 129, 0.3);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #34D399, stop:1 #10B981);
             }}
 
             QPushButton[variant="danger"] {{
@@ -402,7 +389,8 @@ class ThemeManager:
             }}
 
             QPushButton[variant="danger"]:hover {{
-                box-shadow: 0 8px 20px rgba(239, 68, 68, 0.3);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #F87171, stop:1 #EF4444);
             }}
 
             QPushButton[variant="icon"] {{
@@ -625,570 +613,12 @@ def create_gradient_label(text: str, font_size: int = 28, parent=None) -> FadeLa
     """)
     return label
 
-# ========== Worker Threads ==========
-class BaseProcessor(QThread):
-    progress_updated = Signal(int)
-    status_updated = Signal(str)
-    log_message = Signal(str)
+# ========== Worker Threads (imported from core.workers) ==========
+from core.workers import BaseProcessor, FaceSearchProcessor, PhotoProcessor
 
-    def __init__(self):
-        super().__init__()
-        self._is_paused = False
-        self._is_stopped = False
-        self._pause_cond = QWaitCondition()
-        self._pause_lock = QMutex()
-
-    def pause(self) -> None:
-        self._is_paused = True
-        self.log_message.emit("Processing paused")
-
-    def resume(self) -> None:
-        self._is_paused = False
-        self._pause_cond.wakeAll()
-        self.log_message.emit("Processing resumed")
-
-    def stop(self) -> None:
-        self._is_stopped = True
-        self.resume()
-
-    def check_paused(self) -> None:
-        while self._is_paused:
-            self._pause_lock.lock()
-            self._pause_cond.wait(self._pause_lock)
-            self._pause_lock.unlock()
-
-    def __del__(self):
-        try:
-            self.quit()
-            self.wait(1000)
-        except Exception:
-            pass
-
-class FaceSearchProcessor(BaseProcessor):
-    finished_search = Signal(dict)
-    face_found = Signal(str, float)
-
-    def __init__(
-        self,
-        reference_face_path: str,
-        search_folder_path: str,
-        similarity_threshold: float = 0.85
-    ):
-        super().__init__()
-        self.reference_face_path: str = reference_face_path
-        self.search_folder_path: Path = Path(search_folder_path)
-        self.similarity_threshold: float = similarity_threshold
-        self.session_manager = ProcessingSession()
-
-    def _ensure_png_for_deepface(self, path_str: str) -> Tuple[str, bool]:
-        """
-        Convert arbitrary image to a PNG temp file for DeepFace, or return original path on failure.
-        Returns (path_to_use, is_temp).
-        """
-        try:
-            ext = Path(path_str).suffix.lower()
-            if ext in ('.png', '.jpg', '.jpeg'):
-                return path_str, False
-
-            with open(path_str, 'rb') as f:
-                data = f.read()
-
-            try:
-                img = Image.open(io.BytesIO(data))
-                img = img.convert('RGB')
-            except Exception:
-                nparr = np.frombuffer(data, np.uint8)
-                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if cv_img is None:
-                    raise RuntimeError("Cannot decode image for DeepFace")
-                cv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(cv_img)
-
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
-            img.save(tmp.name, format='PNG')
-            tmp.close()
-            return tmp.name, True
-        except Exception as e:
-            self.log_message.emit(f"Could not convert {Path(path_str).name} to PNG for DeepFace: {e}")
-            return path_str, False
-
-    def verify_face_match(self, img1_path: str, img2_path: str) -> Tuple[bool, float]:
-        """
-        Robust face verification using DeepFace.
-        Returns: (is_match: bool, similarity: float [0..1])
-        """
-        if not DEEPFACE_AVAILABLE:
-            return False, 0.0
-
-        try:
-            if not os.path.exists(img1_path) or not os.path.exists(img2_path):
-                self.log_message.emit("Reference or target image missing.")
-                return False, 0.0
-
-            tmp1, tmp1_is_temp = self._ensure_png_for_deepface(img1_path)
-            tmp2, tmp2_is_temp = self._ensure_png_for_deepface(img2_path)
-
-            last_exception = None
-            result = None
-            detector_backends = ["opencv", "retinaface", "ssd"]
-
-            for backend in detector_backends:
-                try:
-                    result = DeepFace.verify(
-                        img1_path=tmp1,
-                        img2_path=tmp2,
-                        model_name="ArcFace",
-                        detector_backend=backend,
-                        enforce_detection=True,  # CRITICAL: Only compare actual faces, not entire images
-                        distance_metric="cosine",
-                        align=True,
-                        silent=True
-                    )
-                    break
-                except Exception as deep_err:
-                    error_str = str(deep_err).lower()
-                    # If face not detected, try next backend
-                    if "face" in error_str and ("detect" in error_str or "found" in error_str or "could not" in error_str):
-                        last_exception = deep_err
-                        result = None
-                        continue
-                    else:
-                        last_exception = deep_err
-                        self.log_message.emit(
-                            f"DeepFace backend {backend} error for {Path(img2_path).name}: {str(deep_err)[:100]}"
-                        )
-                        result = None
-                        continue
-
-            # Cleanup temp PNGs we created
-            for p, is_temp in ((tmp1, tmp1_is_temp), (tmp2, tmp2_is_temp)):
-                if is_temp:
-                    try:
-                        if p and Path(p).exists():
-                            os.unlink(p)
-                    except Exception:
-                        pass
-
-            if result is None:
-                # Face not detected in one or both images
-                self.log_message.emit(f"⚠️ No face detected in {Path(img2_path).name} - skipping")
-                return False, 0.0
-
-            is_verified = bool(result.get("verified", False))
-            distance = float(result.get("distance", 1.0))
-            threshold = float(result.get("threshold", 0.4))
-
-            if threshold > 0:
-                normalized_similarity = max(0.0, 1.0 - (distance / threshold))
-                normalized_similarity = min(1.0, normalized_similarity)
-            else:
-                normalized_similarity = max(0.0, min(1.0, 1.0 - distance))
-
-            raw_similarity = max(0.0, min(1.0, 1.0 - distance))
-            
-            # Use raw similarity directly compared to user's threshold
-            # This is more intuitive: if user sets 70% threshold, images with >=70% similarity match
-            is_match = raw_similarity >= self.similarity_threshold
-            
-            if is_match:
-                self.log_message.emit(
-                    f"✅ MATCH FOUND: {Path(img2_path).name} | "
-                    f"similarity={raw_similarity:.1%}, distance={distance:.4f}"
-                )
-                return True, raw_similarity
-            
-            # Log why it didn't match
-            self.log_message.emit(
-                f"No match for {Path(img2_path).name}: similarity {raw_similarity:.1%} < required {self.similarity_threshold:.0%}"
-            )
-
-            return False, raw_similarity
-
-        except Exception as e:
-            err = str(e)
-            img_name = Path(img2_path).name if 'img2_path' in locals() else 'unknown'
-            error_display = err[:120] + "..." if len(err) > 120 else err
-            self.log_message.emit(f"Error processing {img_name}: {error_display}")
-            return False, 0.0
-
-    def create_thumbnail(self, image_path: Path) -> Optional[QPixmap]:
-        """Create a thumbnail robustly using PIL, fallback to OpenCV."""
-        try:
-            with open(str(image_path), 'rb') as f:
-                raw = f.read()
-
-            try:
-                pil_img = Image.open(io.BytesIO(raw))
-                pil_img.thumbnail(
-                    (AppConfig.DEFAULTS["THUMBNAIL_SIZE"],
-                     AppConfig.DEFAULTS["THUMBNAIL_SIZE"]),
-                    Image.Resampling.LANCZOS
-                )
-                img_byte_arr = io.BytesIO()
-                pil_img.save(img_byte_arr, format='PNG')
-                pixmap = QPixmap()
-                pixmap.loadFromData(img_byte_arr.getvalue())
-                return pixmap
-            except Exception:
-                nparr = np.frombuffer(raw, np.uint8)
-                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if cv_img is None:
-                    self.log_message.emit(f"Thumbnail: cannot decode {image_path.name}")
-                    return None
-
-                h, w = cv_img.shape[:2]
-                max_side = max(h, w)
-                scale = AppConfig.DEFAULTS["THUMBNAIL_SIZE"] / float(max_side)
-                if scale < 1.0:
-                    new_w = int(w * scale)
-                    new_h = int(h * scale)
-                    cv_img = cv2.resize(cv_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-                success, png = cv2.imencode('.png', cv_img)
-                if not success:
-                    return None
-                pixmap = QPixmap()
-                pixmap.loadFromData(png.tobytes())
-                return pixmap
-        except Exception as e:
-            self.log_message.emit(f"Thumbnail creation failed for {image_path.name}: {e}")
-            return None
-
-    def pre_process_image(self, image_path: Path) -> bool:
-        """Pre-process and validate image before face detection"""
-        try:
-            if not image_path.exists():
-                self.log_message.emit(f"File missing: {image_path.name}")
-                return False
-
-            try:
-                with open(str(image_path), 'rb') as f:
-                    raw = f.read()
-            except Exception as e:
-                self.log_message.emit(f"Failed to open {image_path.name}: {e}")
-                return False
-
-            try:
-                img = Image.open(io.BytesIO(raw))
-                img.load()
-                if getattr(img, "size", None) is None:
-                    self.log_message.emit(f"No dimensions found for {image_path.name}")
-                    return False
-                return True
-            except (UnidentifiedImageError, OSError, ValueError):
-                try:
-                    nparr = np.frombuffer(raw, np.uint8)
-                    cv_img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
-                    if cv_img is None:
-                        self.log_message.emit(f"cv2 can't decode {image_path.name}")
-                        return False
-                    return True
-                except Exception as cv_err:
-                    self.log_message.emit(
-                        f"Both PIL & OpenCV failed for {image_path.name}: {str(cv_err)[:100]}"
-                    )
-                    return False
-
-        except Exception as e:
-            self.log_message.emit(f"Unexpected preprocess error for {image_path.name}: {e}")
-            return False
-
-    def run(self) -> None:
-        try:
-            if not DEEPFACE_AVAILABLE:
-                self.status_updated.emit("DeepFace unavailable")
-                self.log_message.emit("DeepFace unavailable - aborting search")
-                return
-
-            self.log_message.emit("=" * 40)
-            self.log_message.emit("Starting face search (strict DeepFace mode)")
-
-            image_files = [
-                f for f in self.search_folder_path.iterdir()
-                if f.suffix.lower() in AppConfig.IMAGE_EXTENSIONS
-            ]
-
-            valid_images = []
-            for image_path in image_files:
-                if self.pre_process_image(image_path):
-                    valid_images.append(image_path)
-                else:
-                    self.log_message.emit(f"Skipping invalid image: {image_path.name}")
-
-            total = len(valid_images)
-            skipped = len(image_files) - total
-
-            if skipped > 0:
-                self.log_message.emit(f"Skipped {skipped} invalid/unreadable images")
-
-            if total == 0:
-                self.status_updated.emit("No valid images found")
-                return
-
-            self.log_message.emit(f"Searching {total} valid images")
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_folder = self.search_folder_path / f"Matched_Faces_{timestamp}"
-            out_folder.mkdir(parents=True, exist_ok=True)
-
-            matched: List[Tuple[str, float]] = []
-            for idx, image_path in enumerate(valid_images):
-                if self._is_stopped:
-                    self.log_message.emit("Processing stopped by user")
-                    return
-
-                self.check_paused()
-
-                progress = int((idx + 1) / total * 100)
-                self.progress_updated.emit(progress)
-                self.status_updated.emit(f"Checking {image_path.name}")
-
-                is_match, sim = self.verify_face_match(
-                    str(self.reference_face_path),
-                    str(image_path)
-                )
-
-                if is_match:
-                    dest = out_folder / image_path.name
-                    try:
-                        shutil.copy2(str(image_path), str(dest))
-                    except Exception as e:
-                        self.log_message.emit(f"Could not copy {image_path.name}: {e}")
-
-                    matched.append((image_path.name, sim))
-                    self.face_found.emit(image_path.name, sim)
-                    self.log_message.emit(f"✅ MATCH: {image_path.name} (sim: {sim:.2%})")
-
-            settings = {
-                "similarity_threshold": self.similarity_threshold,
-                "reference_face": str(self.reference_face_path)
-            }
-            self.session_manager.save(
-                {
-                    "matched": matched,
-                    "total_searched": total,
-                    "skipped": skipped,
-                    "output_folder": str(out_folder)
-                },
-                str(self.search_folder_path),
-                settings
-            )
-
-            results = {
-                "total_searched": total,
-                "skipped": skipped,
-                "matched": len(matched),
-                "matched_files": matched,
-                "output_folder": str(out_folder),
-                "method": "DeepFace (strict)"
-            }
-
-            self.log_message.emit("=" * 40)
-            self.log_message.emit("Search complete!")
-            self.log_message.emit(f"• Valid images processed: {total}")
-            self.log_message.emit(f"• Invalid images skipped: {skipped}")
-            self.log_message.emit(f"• Matches found: {len(matched)}")
-            self.log_message.emit(f"• Output folder: {out_folder.name}")
-            self.log_message.emit("=" * 40)
-
-            self.finished_search.emit(results)
-
-        except Exception as e:
-            self.log_message.emit(f"❌ Error in face search: {e}")
-            self.status_updated.emit(f"Error: {e}")
-
-
-class PhotoProcessor(BaseProcessor):
-    finished_processing = Signal(dict)
-
-    def __init__(
-        self,
-        folder_path: str,
-        blur_threshold: int = 100,
-        similarity_threshold: int = 5
-    ):
-        super().__init__()
-        self.folder_path: Path = Path(folder_path)
-        self.blur_threshold: int = blur_threshold
-        self.similarity_threshold: int = similarity_threshold
-        self.seen_hashes: List[Dict] = []  # Stores hash info dictionaries
-        self.session_manager = ProcessingSession()
-
-    def is_blurry(self, image_path: Path) -> bool:
-        """
-        Enhanced blur detection using multiple metrics:
-        1. Laplacian variance (edge detection)
-        2. Gradient magnitude (Sobel)
-        3. Normalize by image size for fair comparison
-        """
-        try:
-            img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-            if img is None:
-                return False
-            
-            # Resize image to standard size for consistent comparison
-            # This prevents high-res images from always appearing "sharp"
-            h, w = img.shape[:2]
-            max_dim = 800
-            if max(h, w) > max_dim:
-                scale = max_dim / max(h, w)
-                img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-            
-            # Method 1: Laplacian variance (primary method)
-            laplacian = cv2.Laplacian(img, cv2.CV_64F)
-            laplacian_var = laplacian.var()
-            
-            # Method 2: Sobel gradient magnitude
-            sobelx = cv2.Sobel(img, cv2.CV_64F, 1, 0, ksize=3)
-            sobely = cv2.Sobel(img, cv2.CV_64F, 0, 1, ksize=3)
-            gradient_magnitude = np.sqrt(sobelx**2 + sobely**2).mean()
-            
-            # Combined scoring: weighted average of both metrics
-            # Lower scores = more blurry
-            blur_score = (laplacian_var * 0.7) + (gradient_magnitude * 0.3)
-            
-            is_blur = blur_score < self.blur_threshold
-            
-            if is_blur:
-                self.log_message.emit(f"Blur score for {image_path.name}: {blur_score:.1f} (threshold: {self.blur_threshold})")
-            
-            return is_blur
-            
-        except Exception as e:
-            self.log_message.emit(f"Blur error: {e}")
-            return False
-
-    def is_duplicate(self, image_path: Path) -> Tuple[bool, Optional[str]]:
-        """
-        Enhanced duplicate detection using multiple hash algorithms:
-        1. Average hash - good for overall similarity
-        2. Perceptual hash (pHash) - robust to scaling/compression
-        3. Difference hash (dHash) - captures gradients
-        
-        Uses larger hash size (16x16) for better precision.
-        """
-        try:
-            img = Image.open(str(image_path))
-            
-            # Convert to RGB if needed (some formats may be in other modes)
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Use larger hash size for better precision
-            hash_size = 16
-            
-            # Calculate multiple hash types
-            avg_hash = imagehash.average_hash(img, hash_size=hash_size)
-            p_hash = imagehash.phash(img, hash_size=hash_size)
-            d_hash = imagehash.dhash(img, hash_size=hash_size)
-            
-            # Store as combined hash info
-            current_hashes = {
-                'avg': avg_hash,
-                'phash': p_hash,
-                'dhash': d_hash,
-                'path': str(image_path)
-            }
-            
-            # Check against seen images using weighted voting
-            for seen in self.seen_hashes:
-                if isinstance(seen, dict):
-                    # Calculate differences for each hash type
-                    avg_diff = avg_hash - seen['avg']
-                    p_diff = p_hash - seen['phash']
-                    d_diff = d_hash - seen['dhash']
-                    
-                    # Weighted average: pHash is most robust, give it more weight
-                    weighted_diff = (avg_diff * 0.25) + (p_diff * 0.5) + (d_diff * 0.25)
-                    
-                    # If weighted difference is below threshold, it's a duplicate
-                    if weighted_diff <= self.similarity_threshold:
-                        original_name = Path(seen['path']).name
-                        self.log_message.emit(
-                            f"Duplicate found: {image_path.name} matches {original_name} "
-                            f"(diff: {weighted_diff:.1f}, threshold: {self.similarity_threshold})"
-                        )
-                        return True, original_name
-                else:
-                    # Backward compatibility with old hash format
-                    if avg_hash - seen <= self.similarity_threshold:
-                        return True, "previous image"
-            
-            self.seen_hashes.append(current_hashes)
-            return False, None
-            
-        except Exception as e:
-            self.log_message.emit(f"Duplicate error for {image_path.name}: {e}")
-            return False, None
-
-    def run(self) -> None:
-        try:
-            categories = ["Good_Photos", "Blurry_Photos", "Duplicate_Photos"]
-            for category in categories:
-                category_path = self.folder_path / category
-                category_path.mkdir(parents=True, exist_ok=True)
-
-            files = [
-                f for f in self.folder_path.iterdir()
-                if f.suffix.lower() in AppConfig.IMAGE_EXTENSIONS
-            ]
-
-            total = len(files)
-            if total == 0:
-                self.status_updated.emit("No images")
-                return
-
-            results = {"processed": 0, "good": 0, "blurry": 0, "duplicate": 0}
-
-            for idx, image_path in enumerate(files):
-                if self._is_stopped:
-                    self.log_message.emit("Processing stopped by user")
-                    return
-
-                self.check_paused()
-
-                if not image_path.exists():
-                    continue
-
-                progress = int((idx + 1) / total * 100)
-                self.progress_updated.emit(progress)
-                self.status_updated.emit(f"Processing {image_path.name}")
-
-                results["processed"] += 1
-
-                is_dup, _ = self.is_duplicate(image_path)
-                if is_dup:
-                    target = "Duplicate_Photos"
-                    results["duplicate"] += 1
-                    self.log_message.emit(f"Duplicate: {image_path.name}")
-                elif self.is_blurry(image_path):
-                    target = "Blurry_Photos"
-                    results["blurry"] += 1
-                    self.log_message.emit(f"Blurry: {image_path.name}")
-                else:
-                    target = "Good_Photos"
-                    results["good"] += 1
-                    self.log_message.emit(f"Good: {image_path.name}")
-
-                try:
-                    dest = self.folder_path / target / image_path.name
-                    shutil.move(str(image_path), str(dest))
-                except Exception as e:
-                    self.log_message.emit(f"Move failed for {image_path.name}: {e}")
-
-            settings = {
-                "blur_threshold": self.blur_threshold,
-                "similarity_threshold": self.similarity_threshold
-            }
-            self.session_manager.save(results, str(self.folder_path), settings)
-
-            self.finished_processing.emit(results)
-
-        except Exception as e:
-            self.log_message.emit(f"Processing error: {e}")
-            self.status_updated.emit(f"Error: {e}")
-
+# ========== Main Window ==========
 class MainWindow(QMainWindow):
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CLEAN SHOT — Photo Organizer & Face Search")
@@ -2462,7 +1892,7 @@ def main() -> int:
     app.setApplicationDisplayName("Clean Shot - AI Photo Organizer")
     app.setStyle("Fusion")
 
-    font = QFont("Inter", 10)
+    font = QFont("Poppins", 10)
     app.setFont(font)
 
     window = MainWindow()
